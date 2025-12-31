@@ -1,0 +1,177 @@
+# Requires ffmpeg, exiftool, gpac, and optionally mediainfo in PATH
+Write-Host "STEP: Check required tools" -ForegroundColor Green
+Write-Host "--"
+$requiredTools = @("ffmpeg.exe", "exiftool.exe", "gpac.exe")
+foreach ($tool in $requiredTools) {
+    if (!(Get-Command $tool -ErrorAction SilentlyContinue)) {
+        Write-Host "$tool not installed or not in PATH. Please install it." -ForegroundColor Red
+        Pause
+        Exit
+    }
+}
+Write-Host "---FINISHED---" -ForegroundColor Green
+
+# Prompt for output file name
+$name = (Get-Item .).BaseName
+
+# Create directories for organization
+$dirs = @("movs", "original_mp4", "Final")
+foreach ($dir in $dirs) {
+    if (!(Test-Path .\$dir)) { New-Item -ItemType Directory .\$dir }
+}
+
+# Move large .mov files
+Write-Host "STEP: Organize large .mov files" -ForegroundColor Green
+Get-ChildItem *.mov | Where-Object { $_.Length -ge 17MB } | Move-Item -Destination .\movs\
+Write-Host "---FINISHED---" -ForegroundColor Green
+
+# Purge image files
+Write-Host "STEP: Remove image files" -ForegroundColor Green
+Get-ChildItem *.heic, *.jpg, *.jpeg, *.png, *.gif -ErrorAction SilentlyContinue | Remove-Item
+Write-Host "---FINISHED---" -ForegroundColor Green
+
+# Rename .mov files using metadata (optional)
+Write-Host "STEP: Rename .mov files using metadata" -ForegroundColor Green
+
+if (Get-Command exiftool.exe -ErrorAction SilentlyContinue) {
+    # --- 10-Second Countdown Timer Implementation ---
+    $timeoutSeconds = 5
+    $runRenameCheck = $true # Default action: Run the rename check
+
+    Write-Host "Rename .mov files using CreationDate? (Press ANY key to SKIP, defaults to RENAME in $timeoutSeconds seconds)" -NoNewline
+
+    for ($i = $timeoutSeconds; $i -gt 0; $i--) {
+        # Display the countdown, overwriting the previous number
+        Write-Host "`b$i" -NoNewline
+        
+        if ([System.Console]::KeyAvailable) {
+            $runRenameCheck = $false
+            while ([System.Console]::KeyAvailable) {
+                [void][System.Console]::ReadKey($true) 
+            }
+            Write-Host "`nInput received. Skipping rename." -ForegroundColor Yellow
+            break
+        }
+        
+        Start-Sleep -Seconds 1
+    }
+
+    if ($i -eq 0) {
+        Write-Host "`nCountdown finished. Running rename (Default action)." -ForegroundColor Green
+    }
+    # ----------------------------------------------------
+
+    if ($runRenameCheck) {
+        exiftool -d %Y-%m-%d_%H-%M-%S%%c.%%e "-filename<CreationDate" *.mov -overwrite_original
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "exiftool renaming failed" -ForegroundColor Red
+        } else {
+             Write-Host "exiftool renaming complete (check console for details)." -ForegroundColor Cyan
+        }
+    }
+} else {
+    Write-Host "exiftool not found, skipping rename check" -ForegroundColor Yellow
+}
+
+Write-Host "---FINISHED---" -ForegroundColor Green
+
+# Purge broken .mp4 files
+Write-Host "STEP: Remove broken .mp4 files" -ForegroundColor Green
+Get-ChildItem *.mp4 | Where-Object { $_.Length -le 5000 } | Remove-Item
+Write-Host "---FINISHED---" -ForegroundColor Green
+
+# Convert .mov to .mp4 with standardized settings
+Write-Host "STEP: Convert .mov to .mp4" -ForegroundColor Green
+Get-ChildItem *.mov | ForEach-Object {
+    $output = $_.Name -replace "\.mov$", ".mp4"
+    if (!(Test-Path $output)) {
+        ffmpeg -i $_.FullName -c:v libx264 -pix_fmt yuv420p -r 33 -c:a aac -b:a 192k -movflags +faststart -map_metadata 0 $output -y
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "Failed to convert $($_.Name) to .mp4" -ForegroundColor Red
+        }
+    }
+}
+Write-Host "---FINISHED---" -ForegroundColor Green
+
+# Check for no-audio .mp4 files (optional)
+Write-Host "STEP: Check for no-audio .mp4 files" -ForegroundColor Green
+
+if (Get-Command mediainfo.exe -ErrorAction SilentlyContinue) {
+    # --- 10-Second Countdown Timer Implementation ---
+    $timeoutSeconds = 5
+    $runAudioCheck = $true # Default action: Run the check
+
+    Write-Host "Check for no-audio .mp4 files? (Press ANY key to SKIP, defaults to CHECK in $timeoutSeconds seconds)" -NoNewline
+
+    for ($i = $timeoutSeconds; $i -gt 0; $i--) {
+        # Display the countdown, overwriting the previous number
+        Write-Host "`b$i" -NoNewline
+        
+        # Check if a key has been pressed without blocking the script
+        if ([System.Console]::KeyAvailable) {
+            # Key pressed: Set flag to skip and clear any buffered keys
+            $runAudioCheck = $false
+            while ([System.Console]::KeyAvailable) {
+                # ReadKey($true) reads the key without displaying it
+                [void][System.Console]::ReadKey($true) 
+            }
+            Write-Host "`nInput received. Skipping audio check." -ForegroundColor Yellow
+            break
+        }
+        
+        Start-Sleep -Seconds 1
+    }
+
+    # Ensure a newline if the countdown finished naturally
+    if ($i -eq 0) {
+        Write-Host "`nCountdown finished. Running audio check (Default action)." -ForegroundColor Green
+    }
+    # ----------------------------------------------------
+
+    if ($runAudioCheck) {
+        Get-ChildItem *.mp4 | ForEach-Object {
+            $audio = mediainfo $_.Name "--Inform=Audio;%Format%"
+            if ($audio -eq "") {
+                Rename-Item $_.Name "X_$($_.Name)_noaudio"
+                Write-Host "Renamed $($_.Name) to X_$($_.Name)_noaudio (no audio)" -ForegroundColor Yellow
+            }
+        }
+    }
+} else {
+    Write-Host "mediainfo not found, skipping audio check" -ForegroundColor Yellow
+}
+Write-Host "---FINISHED---" -ForegroundColor Green
+
+
+# Move remaining .mov files
+Get-ChildItem *.mov | Move-Item -Destination .\movs\
+
+# Convert .mp4 files to standard resolution
+Write-Host "STEP: Standardize .mp4 resolution" -ForegroundColor Green
+Get-ChildItem *.mp4 | Where-Object { $_.Name -notlike "Converted*" } | ForEach-Object {
+    $output = "Converted_$($_.Name)"
+    if (!(Test-Path $output)) {
+        gpac -i $_.Name ffsws:osize=1920x1440:keepar=full:ofr=true ffenc:c=avc:fintra=1 -o $output
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "Failed to standardize $($_.Name)" -ForegroundColor Red
+        }
+    }
+}
+Write-Host "---FINISHED---" -ForegroundColor Green
+
+# Move original .mp4 files
+Get-ChildItem *.mp4 | Where-Object { $_.Name -notlike "Converted*" } | Move-Item -Destination .\original_mp4\ -Force
+
+# Rename title file
+if (Test-Path .\Converted_0.mp4_title) { Rename-Item Converted_0.mp4_title Converted_0.mp4 }
+
+# Combine .mp4 files:out files
+Write-Host "STEP: Combine videos" -ForegroundColor Green
+gpac -r -stats flist:srcs=./*.mp4 ffsws:osize=1920x1440:keepar=full ffenc:c=avc:fintra=1 -o "Final\$name.mp4"
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "Successfully created Final\$name.mp4" -ForegroundColor Green
+} else {
+    Write-Host "Failed to combine videos" -ForegroundColor Red
+    Pause
+}
+Write-Host "---FINISHED---" -ForegroundColor Green
